@@ -37,7 +37,7 @@ def ap_text(ap, show_id=False):
 
 def menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Yangi bemor qoshish", callback_data="add")],
+        [InlineKeyboardButton("Shifokor qabuliga yozilish", callback_data="add")],
         [InlineKeyboardButton("Barcha bemorlar", callback_data="list")],
         [InlineKeyboardButton("Bugungi qabullar", callback_data="today")],
         [InlineKeyboardButton("Bemor ochirish", callback_data="del_start")],
