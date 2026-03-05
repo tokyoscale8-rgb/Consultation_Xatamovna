@@ -7,7 +7,7 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-BOT_TOKEN = "BU_YERGA_TOKEN_KIRITING"
+BOT_TOKEN = "8603255120:AAFrLdxfv1uoPUzCGHh0w4ZQG0tmwMiRIUI"
 DOCTOR_CHAT_ID = None
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
