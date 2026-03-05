@@ -7,12 +7,17 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-BOT_TOKEN = "8603255120:AAFrLdxfv1uoPUzCGHh0w4ZQG0tmwMiRIUI"
+BOT_TOKEN = "BU_YERGA_TOKEN_KIRITING"
 DOCTOR_CHAT_ID = None
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-ASK_NAME, ASK_PHONE, ASK_DATE, ASK_TIME, ASK_NOTE, CONFIRM = range(6)
+ASK_NAME, ASK_PHONE, ASK_DATE, ASK_CLINIC, ASK_NOTE, CONFIRM = range(6)
+
+CLINICS = {
+    "clinic_1": "Darmon Servis klinikasi (Chilonzor tumani)",
+    "clinic_2": "As Sihat klinikasi (Yashnobod tumani)",
+}
 
 appointments = {}
 next_id = 1
@@ -24,7 +29,7 @@ def ap_text(ap, show_id=False):
     lines.append("Ism: " + ap["name"])
     lines.append("Tel: " + ap["phone"])
     lines.append("Sana: " + ap["date"])
-    lines.append("Vaqt: " + ap["time"])
+    lines.append("Klinika: " + ap["clinic"])
     if ap.get("note"):
         lines.append("Izoh: " + ap["note"])
     return "\n".join(lines)
@@ -35,12 +40,12 @@ def menu():
         [InlineKeyboardButton("Barcha bemorlar", callback_data="list")],
         [InlineKeyboardButton("Bugungi qabullar", callback_data="today")],
         [InlineKeyboardButton("Bemor ochirish", callback_data="del_start")],
+
+
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global DOCTOR_CHAT_ID
-
-
     DOCTOR_CHAT_ID = update.effective_chat.id
     await update.message.reply_text("Shifokor qabul boti\n\nMenyudan tanlang:", reply_markup=menu())
 
@@ -67,23 +72,23 @@ async def got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Noto'g'ri format. Qaytadan kiriting (masalan: 15.06.2025):")
         return ASK_DATE
     context.user_data["date"] = text
-    await update.message.reply_text("Qabul vaqtini kiriting (masalan: 14:30):")
-    return ASK_TIME
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Darmon Servis klinikasi (Chilonzor)", callback_data="clinic_1")],
+        [InlineKeyboardButton("As Sihat klinikasi (Yashnobod)", callback_data="clinic_2")],
+    ])
+    await update.message.reply_text("Qabul joyini tanlang:", reply_markup=kb)
+    return ASK_CLINIC
 
-async def got_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    try:
-        datetime.strptime(text, "%H:%M")
-    except ValueError:
-        await update.message.reply_text("Noto'g'ri format. Qaytadan kiriting (masalan: 14:30):")
-        return ASK_TIME
-    context.user_data["time"] = text
-    await update.message.reply_text("Izoh kiriting yoki /skip yozing:")
+async def got_clinic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    clinic_key = update.callback_query.data
+    context.user_data["clinic"] = CLINICS[clinic_key]
+
+
+    await update.callback_query.message.reply_text("Izoh kiriting yoki /skip yozing:")
     return ASK_NOTE
 
 async def got_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-
     context.user_data["note"] = update.message.text.strip()
     return await show_confirm(update, context)
 
@@ -98,7 +103,7 @@ async def show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ism: " + d["name"] + "\n"
         "Tel: " + d["phone"] + "\n"
         "Sana: " + d["date"] + "\n"
-        "Vaqt: " + d["time"] + "\n"
+        "Klinika: " + d["clinic"] + "\n"
         "Izoh: " + (d.get("note") or "-")
     )
     kb = InlineKeyboardMarkup([
@@ -117,17 +122,18 @@ async def save_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "name": d["name"],
         "phone": d["phone"],
         "date": d["date"],
-        "time": d["time"],
+        "clinic": d["clinic"],
         "note": d.get("note", ""),
         "r1d": False,
         "r2h": False,
     }
     appointments[next_id] = ap
+
+
     next_id += 1
     await update.callback_query.message.reply_text("Bemor saqlandi!\n\n" + ap_text(ap, show_id=True), reply_markup=menu())
     context.user_data.clear()
     return ConversationHandler.END
-
 
 async def cancel_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -140,7 +146,7 @@ async def list_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not appointments:
         await update.callback_query.message.reply_text("Hozircha bemor yoq.", reply_markup=menu())
         return
-    items = sorted(appointments.values(), key=lambda x: datetime.strptime(x["date"] + " " + x["time"], "%d.%m.%Y %H:%M"))
+    items = sorted(appointments.values(), key=lambda x: datetime.strptime(x["date"], "%d.%m.%Y"))
     text = "Barcha bemorlar:\n\n"
     for ap in items:
         text += ap_text(ap, show_id=True) + "\n" + "-" * 20 + "\n"
@@ -150,7 +156,6 @@ async def today_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     today = datetime.now().strftime("%d.%m.%Y")
     items = [ap for ap in appointments.values() if ap["date"] == today]
-    items.sort(key=lambda x: x["time"])
     if not items:
         await update.callback_query.message.reply_text("Bugun qabul yoq.", reply_markup=menu())
         return
@@ -166,11 +171,12 @@ async def del_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     buttons = []
     for ap in appointments.values():
-        label = "#" + str(ap["id"]) + " - " + ap["name"] + " (" + ap["date"] + " " + ap["time"] + ")"
+        label = "#" + str(ap["id"]) + " - " + ap["name"] + " (" + ap["date"] + ")"
         buttons.append([InlineKeyboardButton(label, callback_data="d_" + str(ap["id"]))])
+
+
     buttons.append([InlineKeyboardButton("Orqaga", callback_data="back")])
     await update.callback_query.message.reply_text("Ochirmoqchi bo'lgan bemorni tanlang:", reply_markup=InlineKeyboardMarkup(buttons))
-
 
 async def del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -191,17 +197,17 @@ async def reminders(app):
         now = datetime.now()
         for ap in list(appointments.values()):
             try:
-                ap_dt = datetime.strptime(ap["date"] + " " + ap["time"], "%d.%m.%Y %H:%M")
+                ap_dt = datetime.strptime(ap["date"], "%d.%m.%Y")
             except ValueError:
                 continue
-            diff = (ap_dt - now).total_seconds() / 60
-            if not ap["r1d"] and 1430 <= diff <= 1450:
+            diff_hours = (ap_dt - now).total_seconds() / 3600
+            if not ap["r1d"] and 23.8 <= diff_hours <= 24.2:
                 if DOCTOR_CHAT_ID:
                     await app.bot.send_message(DOCTOR_CHAT_ID, "1 KUN OLDINGI ESLATMA\n\n" + ap_text(ap) + "\n\nErtaga qabul bor!")
                 ap["r1d"] = True
-            if not ap["r2h"] and 110 <= diff <= 130:
+            if not ap["r2h"] and 1.8 <= diff_hours <= 2.2:
                 if DOCTOR_CHAT_ID:
-                    await app.bot.send_message(DOCTOR_CHAT_ID, "2 SOAT OLDINGI ESLATMA\n\n" + ap_text(ap) + "\n\nQabul 2 soatdan keyin!")
+                    await app.bot.send_message(DOCTOR_CHAT_ID, "2 SOAT OLDINGI ESLATMA\n\n" + ap_text(ap) + "\n\nBugun qabul bor!")
                 ap["r2h"] = True
 
 def main():
@@ -210,16 +216,16 @@ def main():
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_start, pattern="^add$")],
         states={
-            ASK_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
-            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_phone)],
-            ASK_DATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_date)],
-            ASK_TIME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_time)],
-            ASK_NOTE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_note),
-                        CommandHandler("skip", skip_note)],
+            ASK_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
+            ASK_PHONE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_phone)],
 
 
-            CONFIRM:   [CallbackQueryHandler(save_ap, pattern="^save$"),
-                        CallbackQueryHandler(cancel_ap, pattern="^cancel$")],
+            ASK_DATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_date)],
+            ASK_CLINIC: [CallbackQueryHandler(got_clinic, pattern="^clinic_")],
+            ASK_NOTE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_note),
+                         CommandHandler("skip", skip_note)],
+            CONFIRM:    [CallbackQueryHandler(save_ap, pattern="^save$"),
+                         CallbackQueryHandler(cancel_ap, pattern="^cancel$")],
         },
         fallbacks=[CommandHandler("start", start)],
     )
