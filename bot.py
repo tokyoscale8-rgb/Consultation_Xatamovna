@@ -27,8 +27,9 @@ def ap_text(ap, show_id=False):
     if show_id:
         lines.append("ID: " + str(ap["id"]))
     lines.append("Ism: " + ap["name"])
+    lines.append("Bemorning yoshi: " + ap["age"])
     lines.append("Tel: " + ap["phone"])
-    lines.append("Sana: " + ap["date"])
+    lines.append("Bemorni bezovta qiloyatgan muammo haqida qisqacha ma'lumot bering: " + ap["information"])
     lines.append("Klinika: " + ap["clinic"])
     if ap.get("note"):
         lines.append("Izoh: " + ap["note"])
