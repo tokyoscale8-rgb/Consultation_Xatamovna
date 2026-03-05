@@ -58,10 +58,6 @@ async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Telefon raqamini kiriting:")
     return ASK_PHONE
 
-async def got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["phone"] = update.message.text.strip()
-    await update.message.reply_text("Qabul sanasini kiriting (masalan: 15.06.2025):")
-    return ASK_DATE
 
 async def got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
