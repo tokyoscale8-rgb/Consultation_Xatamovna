@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Bot va Dispatcher
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=8603255120:AAFrLdxfv1uoPUzCGHh0w4ZQG0tmwMiRIUI)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 scheduler = AsyncIOScheduler()
