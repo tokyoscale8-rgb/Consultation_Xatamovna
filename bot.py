@@ -1,284 +1,416 @@
 import logging
 import asyncio
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler
-)
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import gspread
+from google.oauth2.service_account import Credentials
+from config import BOT_TOKEN, DOCTOR_CHAT_ID, SPREADSHEET_ID, CREDENTIALS_FILE
 
-BOT_TOKEN = "8603255120:AAFrLdxfv1uoPUzCGHh0w4ZQG0tmwMiRIUI"
-DOCTOR_CHAT_ID = None
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+# Bot va Dispatcher
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+scheduler = AsyncIOScheduler()
 
-# Bemor uchun holatlar
-ASK_NAME, ASK_AGE, ASK_PROBLEM, ASK_CLINIC, DONE = range(5)
+# Google Sheets ulanish
+def get_sheet():
+    scopes = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID).sheet1
 
-CLINICS = {
-    "clinic_1": "Darmon Servis klinikasi (Chilonzor tumani)",
-    "clinic_2": "As-Sihat klinikasi (Yashnobod tumani)",
+# Klinikalar
+KLINIKALAR = {
+ "darmon": " Darmon Servis Klinikasi (Chilonzor tumani)",
+ "assihat": " As Sihat Klinikasi (Yashnobod tumani)"
 }
 
-applications = {}
-next_id = 1
-
-def app_text(ap, show_id=False):
-    lines = []
-    if show_id:
-        lines.append("Ariza ID: " + str(ap["id"]))
-    lines.append("Ism: " + ap["name"])
-    lines.append("Yosh: " + ap["age"])
-    lines.append("Muammo: " + ap["problem"])
-    lines.append("Klinika: " + ap["clinic"])
-    lines.append("Vaqt: " + ap["time"])
-    if ap.get("status"):
-        lines.append("Holat: " + ap["status"])
-    return "\n".join(lines)
-
-def doctor_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Yangi arizalar", callback_data="new_apps")],
-        [InlineKeyboardButton("Barcha arizalar", callback_data="all_apps")],
+# FSM holatlari
+class BemorForm(StatesGroup):
+    ism = State()
+    telefon = State()
 
 
-        [InlineKeyboardButton("Arizani tasdiqlash", callback_data="confirm_start")],
-        [InlineKeyboardButton("Arizani rad etish", callback_data="reject_start")],
+    tugilgan_sana = State()
+    shikoyat = State()
+    klinika = State()
+
+# ==================== START ====================
+@dp.message(CommandStart())
+async def start_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+    kb = ReplyKeyboardMarkup(
+ keyboard=[[KeyboardButton(text=" Qabulga yozilish")]],
+        resize_keyboard=True
+    )
+    await message.answer(
+ " Assalomu alaykum!\n\n"
+        "Shifokor qabuliga yozilish uchun quyidagi tugmani bosing.",
+        reply_markup=kb
+    )
+
+@dp.message(F.text == " Qabulga yozilish")
+async def qabul_boshlash(message: types.Message, state: FSMContext):
+    await state.set_state(BemorForm.ism)
+    await message.answer(
+ " Ismingiz va familiyangizni kiriting:\n"
+        "(Masalan: Aliyev Jasur)"
+    )
+
+# ==================== ISM ====================
+@dp.message(BemorForm.ism)
+async def ism_handler(message: types.Message, state: FSMContext):
+    await state.update_data(ism=message.text.strip())
+    await state.set_state(BemorForm.telefon)
+ await message.answer(" Telefon raqamingizni kiriting:\n(Masalan: +998901234567)")
+
+# ==================== TELEFON ====================
+@dp.message(BemorForm.telefon)
+async def telefon_handler(message: types.Message, state: FSMContext):
+    await state.update_data(telefon=message.text.strip())
+    await state.set_state(BemorForm.tugilgan_sana)
+ await message.answer(" Tug'ilgan sanangizni kiriting:\n(Masalan: 15.03.1990)")
+
+# ==================== TUG'ILGAN SANA ====================
+@dp.message(BemorForm.tugilgan_sana)
+async def tugilgan_sana_handler(message: types.Message, state: FSMContext):
+    await state.update_data(tugilgan_sana=message.text.strip())
+    await state.set_state(BemorForm.shikoyat)
+ await message.answer(" Muammo yoki shikoyatingizni qisqacha bayon qiling:")
+
+
+# ==================== SHIKOYAT ====================
+@dp.message(BemorForm.shikoyat)
+async def shikoyat_handler(message: types.Message, state: FSMContext):
+    await state.update_data(shikoyat=message.text.strip())
+    await state.set_state(BemorForm.klinika)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+ [InlineKeyboardButton(text=" Darmon Servis (Chilonzor)", callback_data="klinika_darmon")],
+ [InlineKeyboardButton(text=" As Sihat (Yashnobod)", callback_data="klinika_assihat")]
     ])
-
-# ─── SHIFOKOR ───────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global DOCTOR_CHAT_ID
-    user = update.effective_user
-    text = update.message.text
-
-    # Shifokor /start doktor deb kiradi
-    if text and "doktor" in text.lower():
-        DOCTOR_CHAT_ID = update.effective_chat.id
-        await update.message.reply_text(
-            "Shifokor paneliga xush kelibsiz!\n\nMenyudan tanlang:",
-            reply_markup=doctor_menu()
-        )
-        return ConversationHandler.END
-
-    # Bemor uchun
-    await update.message.reply_text(
-        "Assalomu alaykum!\n\nSizni shifokor qabuliga yozish uchun bir nechta savol beramiz.\n\nBoshlaymizmi? Iltimos, to'liq ism-sharifingizni kiriting:"
-    )
-    return ASK_NAME
-
-async def new_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    items = [ap for ap in applications.values() if ap.get("status") == "Yangi"]
-    if not items:
-        await update.callback_query.message.reply_text("Yangi ariza yoq.", reply_markup=doctor_menu())
-        return
-    text = "Yangi arizalar:\n\n"
-    for ap in items:
-        text += app_text(ap, show_id=True) + "\n" + "-" * 25 + "\n"
-    await update.callback_query.message.reply_text(text, reply_markup=doctor_menu())
-
-async def all_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not applications:
-        await update.callback_query.message.reply_text("Hozircha ariza yoq.", reply_markup=doctor_menu())
-        return
-    text = "Barcha arizalar:\n\n"
-    for ap in sorted(applications.values(), key=lambda x: x["id"]):
-
-
-        text += app_text(ap, show_id=True) + "\n" + "-" * 25 + "\n"
-    await update.callback_query.message.reply_text(text, reply_markup=doctor_menu())
-
-async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    items = [ap for ap in applications.values() if ap.get("status") == "Yangi"]
-    if not items:
-        await update.callback_query.message.reply_text("Tasdiqlanadigan ariza yoq.", reply_markup=doctor_menu())
-        return
-    buttons = []
-    for ap in items:
-        label = "#" + str(ap["id"]) + " - " + ap["name"]
-        buttons.append([InlineKeyboardButton(label, callback_data="conf_" + str(ap["id"]))])
-    buttons.append([InlineKeyboardButton("Orqaga", callback_data="back")])
-    await update.callback_query.message.reply_text("Qaysi arizani tasdiqlaysiz?", reply_markup=InlineKeyboardMarkup(buttons))
-
-async def confirm_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ap_id = int(update.callback_query.data.split("_")[1])
-    if ap_id not in applications:
-        await update.callback_query.message.reply_text("Ariza topilmadi.", reply_markup=doctor_menu())
-        return
-
-    ap = applications[ap_id]
-    ap["status"] = "Tasdiqlandi"
-
-    # Shifokorga xabar
-    await update.callback_query.message.reply_text(
-        "#" + str(ap_id) + " ariza tasdiqlandi.\n\n" + app_text(ap, show_id=True),
-        reply_markup=doctor_menu()
+    await message.answer(
+ " Qaysi klinikaga tashrif buyurishingiz qulayroq?",
+        reply_markup=kb
     )
 
-    # Bemorga xabar yuborish (agar chat_id saqlangan bo'lsa)
-    if ap.get("chat_id"):
-        try:
-            await update.get_bot().send_message(
-                ap["chat_id"],
-                "Hurmatli " + ap["name"] + ",\n\n"
-                "Shifokor sizning arizangizni qabul qildi.\n\n"
-                "Qabul joyi: " + ap["clinic"] + "\n\n"
-                "Tez orada qabul sanasi va vaqti to'g'risida xabar beriladi.\n\n"
-                "Savollar uchun aloqaga chiqing."
-            )
-        except Exception:
-            pass
+# ==================== KLINIKA TANLASH ====================
+@dp.callback_query(F.data.startswith("klinika_"))
+async def klinika_handler(callback: types.CallbackQuery, state: FSMContext):
+    klinika_key = callback.data.replace("klinika_", "")
+    klinika_nomi = KLINIKALAR.get(klinika_key, "Noma'lum")
+    await state.update_data(klinika=klinika_nomi, klinika_key=klinika_key)
 
-
-async def reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    items = [ap for ap in applications.values() if ap.get("status") == "Yangi"]
-    if not items:
-        await update.callback_query.message.reply_text("Rad etiladigan ariza yoq.", reply_markup=doctor_menu())
-        return
-    buttons = []
-    for ap in items:
-        label = "#" + str(ap["id"]) + " - " + ap["name"]
-        buttons.append([InlineKeyboardButton(label, callback_data="rej_" + str(ap["id"]))])
-    buttons.append([InlineKeyboardButton("Orqaga", callback_data="back")])
-    await update.callback_query.message.reply_text("Qaysi arizani rad etasiz?", reply_markup=InlineKeyboardMarkup(buttons))
-
-async def reject_ap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ap_id = int(update.callback_query.data.split("_")[1])
-    if ap_id not in applications:
-        await update.callback_query.message.reply_text("Ariza topilmadi.", reply_markup=doctor_menu())
-        return
-
-    ap = applications[ap_id]
-    ap["status"] = "Rad etildi"
-
-    await update.callback_query.message.reply_text(
-        "#" + str(ap_id) + " ariza rad etildi.",
-        reply_markup=doctor_menu()
-    )
-
-    if ap.get("chat_id"):
-        try:
-            await update.get_bot().send_message(
-                ap["chat_id"],
-                "Hurmatli " + ap["name"] + ",\n\n"
-                "Afsuski, hozirda qabul uchun joy mavjud emas.\n"
-                "Iltimos, keyinroq qayta murojaat qiling."
-            )
-        except Exception:
-            pass
-
-async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("Asosiy menyu:", reply_markup=doctor_menu())
-
-
-# ─── BEMOR ───────────────────────────────────────
-
-async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text.strip()
-    await update.message.reply_text("Yoshingizni kiriting (masalan: 35):")
-    return ASK_AGE
-
-async def got_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["age"] = update.message.text.strip()
-    await update.message.reply_text("Sizni qiynayotgan muammo haqida qisqacha ma'lumot bering:")
-    return ASK_PROBLEM
-
-async def got_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["problem"] = update.message.text.strip()
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Darmon Servis klinikasi (Chilonzor)", callback_data="clinic_1")],
-        [InlineKeyboardButton("As-Sihat klinikasi (Yashnobod)", callback_data="clinic_2")],
-    ])
-    await update.message.reply_text("Ko'rik uchun qaysi klinika sizga qulayroq?", reply_markup=kb)
-    return ASK_CLINIC
-
-async def got_clinic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global next_id
-    await update.callback_query.answer()
-
-    clinic_key = update.callback_query.data
-    context.user_data["clinic"] = CLINICS[clinic_key]
-
-    d = context.user_data
-    ap = {
-        "id": next_id,
-        "name": d["name"],
-        "age": d["age"],
-        "problem": d["problem"],
-        "clinic": d["clinic"],
-        "time": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "status": "Yangi",
-        "chat_id": update.effective_chat.id,
-    }
-    applications[next_id] = ap
-    next_id += 1
+    data = await state.get_data()
 
     # Bemorga tasdiqlash xabari
-
-
-    await update.callback_query.message.reply_text(
-        "Hurmatli " + d["name"] + ",\n\n"
-        "Muvaffaqiyatli qabulga yozildingiz!\n\n"
-        "Ariza ma'lumotlari:\n"
-        "Ism: " + d["name"] + "\n"
-        "Yosh: " + d["age"] + "\n"
-        "Klinika: " + d["clinic"] + "\n\n"
-        "Shifokor arizangizni ko'rib chiqqanidan so'ng, qabul sanasi va vaqti to'g'risida "
-        "sizga alohida xabar yuboriladi.\n\n"
-        "Sabrli kutganingiz uchun rahmat!"
+    await callback.message.edit_text(
+ f" Arizangiz qabul qilindi!\n\n"
+ f" Ism: {data['ism']}\n"
+ f" Telefon: {data['telefon']}\n"
+ f" Tug'ilgan sana: {data['tugilgan_sana']}\n"
+ f" Shikoyat: {data['shikoyat']}\n"
+ f" Klinika: {klinika_nomi}\n\n"
+ f" Shifokor qabul kunini tasdiqlashi bilan sizga xabar yuboramiz."
     )
 
-    # Shifokorga yangi ariza xabari
-    if DOCTOR_CHAT_ID:
-        try:
-            await update.get_bot().send_message(
-                DOCTOR_CHAT_ID,
-                "YANGI ARIZA KELDI!\n\n" + app_text(ap, show_id=True),
-                reply_markup=doctor_menu()
+    # Google Sheets ga saqlash
+    bemor_id = await saqlash_google_sheets(data, callback.from_user.id)
+
+    # Shifokorga xabar yuborish
+    await shifokorga_xabar(data, callback.from_user.id, bemor_id)
+
+    await state.clear()
+    await callback.answer()
+
+# ==================== GOOGLE SHEETS GA SAQLASH ====================
+async def saqlash_google_sheets(data: dict, user_id: int) -> int:
+    try:
+
+
+        sheet = get_sheet()
+        all_records = sheet.get_all_values()
+        bemor_id = len(all_records)  # ID = qatorlar soni
+
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        row = [
+            bemor_id,
+            data['ism'],
+            data['telefon'],
+            data['tugilgan_sana'],
+            data['shikoyat'],
+            data['klinika'],
+            str(user_id),
+            now,       # Ariza vaqti
+            "",        # Qabul sanasi (shifokor to'ldiradi)
+            "",        # Qabul vaqti (shifokor to'ldiradi)
+            "Kutilmoqda"  # Status
+        ]
+        sheet.append_row(row)
+        logger.info(f"Bemor #{bemor_id} Google Sheets ga saqlandi.")
+        return bemor_id
+    except Exception as e:
+        logger.error(f"Google Sheets xatosi: {e}")
+        return 0
+
+# ==================== SHIFOKORGA XABAR ====================
+async def shifokorga_xabar(data: dict, user_id: int, bemor_id: int):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+ text=" Qabul kunini belgilash",
+            callback_data=f"belgilash_{bemor_id}_{user_id}"
+        )]
+    ])
+    text = (
+ f" <b>YANGI BEMOR ARIZA QOLDIRDI!</b>\n\n"
+ f" Bemor ID: #{bemor_id}\n"
+ f" Ism: {data['ism']}\n"
+ f" Telefon: {data['telefon']}\n"
+ f" Tug'ilgan sana: {data['tugilgan_sana']}\n"
+ f" Shikoyat: {data['shikoyat']}\n"
+ f" Klinika: {data['klinika']}\n\n"
+ f" Qabul kunini belgilash uchun tugmani bosing."
+    )
+    await bot.send_message(DOCTOR_CHAT_ID, text, parse_mode="HTML", reply_markup=kb)
+
+# ==================== SHIFOKOR: QABUL KUNINI BELGILASH ====================
+class QabulBelgilash(StatesGroup):
+
+
+    sana = State()
+    vaqt = State()
+
+doctor_states = {}  # {doctor_chat_id: {bemor_id, user_id}}
+
+@dp.callback_query(F.data.startswith("belgilash_"))
+async def belgilash_handler(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    bemor_id = parts[1]
+    user_id = parts[2]
+
+    await state.set_state(QabulBelgilash.sana)
+    await state.update_data(bemor_id=bemor_id, user_id=user_id)
+
+    await callback.message.answer(
+ f" Bemor #{bemor_id} uchun qabul sanasini kiriting:\n"
+        f"(Masalan: 25.06.2025)"
+    )
+    await callback.answer()
+
+@dp.message(QabulBelgilash.sana)
+async def qabul_sana_handler(message: types.Message, state: FSMContext):
+    await state.update_data(qabul_sana=message.text.strip())
+    await state.set_state(QabulBelgilash.vaqt)
+ await message.answer(" Qabul vaqtini kiriting:\n(Masalan: 10:00)")
+
+@dp.message(QabulBelgilash.vaqt)
+async def qabul_vaqt_handler(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    bemor_id = data['bemor_id']
+    user_id = int(data['user_id'])
+    qabul_sana = data['qabul_sana']
+    qabul_vaqt = message.text.strip()
+
+    # Google Sheets ni yangilash
+    bemor_malumoti = await yangilash_sheets(bemor_id, qabul_sana, qabul_vaqt)
+
+    if bemor_malumoti:
+        ism = bemor_malumoti['ism']
+        klinika = bemor_malumoti['klinika']
+
+        # Bemorga xabar
+        await bot.send_message(
+            user_id,
+ f" <b>Qabulingiz tasdiqlandi!</b>\n\n"
+ f" Hurmatli {ism},\n\n"
+            f"Siz shifokor qabuliga muvaffaqiyatli yozildingiz:\n\n"
+
+
+ f" Sana: <b>{qabul_sana}</b>\n"
+ f" Vaqt: <b>{qabul_vaqt}</b>\n"
+ f" Klinika: <b>{klinika}</b>\n\n"
+ f"Vaqtida tashrif buyuring! ",
+            parse_mode="HTML"
+        )
+
+        # Shifokorga to'liq xulosa
+        await bot.send_message(
+            DOCTOR_CHAT_ID,
+ f" <b>QABUL TASDIQLANDI</b>\n\n"
+ f" Bemor ID: #{bemor_id}\n"
+ f" Ism: {ism}\n"
+ f" Telefon: {bemor_malumoti['telefon']}\n"
+ f" Tug'ilgan sana: {bemor_malumoti['tugilgan_sana']}\n"
+ f" Shikoyat: {bemor_malumoti['shikoyat']}\n"
+ f" Klinika: {klinika}\n"
+ f" Qabul sanasi: <b>{qabul_sana}</b>\n"
+ f" Qabul vaqti: <b>{qabul_vaqt}</b>",
+            parse_mode="HTML"
+        )
+
+        # Eslatmalarni rejalashtirish
+        await rejalashtirish_eslatmalar(bemor_id, ism, klinika, qabul_sana, qabul_vaqt, user_id)
+
+ await message.answer(f" Bemor #{bemor_id} uchun qabul belgilandi va xabarlar yuborildi!")
+    else:
+ await message.answer(" Xatolik yuz berdi. Iltimos qayta urinib ko'ring.")
+
+    await state.clear()
+
+# ==================== GOOGLE SHEETS YANGILASH ====================
+async def yangilash_sheets(bemor_id: str, qabul_sana: str, qabul_vaqt: str) -> dict | None:
+    try:
+        sheet = get_sheet()
+        all_rows = sheet.get_all_values()
+        for i, row in enumerate(all_rows):
+            if str(row[0]) == str(bemor_id):
+                sheet.update_cell(i + 1, 9, qabul_sana)
+                sheet.update_cell(i + 1, 10, qabul_vaqt)
+                sheet.update_cell(i + 1, 11, "Tasdiqlangan")
+                return {
+                    'ism': row[1],
+                    'telefon': row[2],
+                    'tugilgan_sana': row[3],
+                    'shikoyat': row[4],
+                    'klinika': row[5]
+
+
+                }
+    except Exception as e:
+        logger.error(f"Yangilash xatosi: {e}")
+    return None
+
+# ==================== ESLATMALAR REJALASHTIRISH ====================
+async def rejalashtirish_eslatmalar(bemor_id, ism, klinika, qabul_sana, qabul_vaqt, user_id):
+    try:
+        qabul_dt = datetime.strptime(f"{qabul_sana} {qabul_vaqt}", "%d.%m.%Y %H:%M")
+
+        # 1 kun oldin eslatma (shifokorga)
+        bir_kun_oldin = qabul_dt - timedelta(days=1)
+        if bir_kun_oldin > datetime.now():
+            scheduler.add_job(
+                eslatma_bir_kun,
+                'date',
+                run_date=bir_kun_oldin,
+                args=[bemor_id, ism, klinika, qabul_sana, qabul_vaqt],
+                id=f"1kun_{bemor_id}"
             )
-        except Exception:
-            pass
 
-    context.user_data.clear()
-    return ConversationHandler.END
+        # 1 soat oldin eslatma (shifokorga)
+        bir_soat_oldin = qabul_dt - timedelta(hours=1)
+        if bir_soat_oldin > datetime.now():
+            scheduler.add_job(
+                eslatma_bir_soat,
+                'date',
+                run_date=bir_soat_oldin,
+                args=[bemor_id, ism, klinika, qabul_sana, qabul_vaqt],
+                id=f"1soat_{bemor_id}"
+            )
 
-# ─── MAIN ───────────────────────────────────────
+        # Qabul tugagandan keyin "Ko'rikdan o'tkazildi" tugmasi
+        scheduler.add_job(
+            korik_tasdiqlash_yuborish,
+            'date',
+            run_date=qabul_dt,
+            args=[bemor_id, ism, klinika, qabul_sana, qabul_vaqt, user_id],
+            id=f"korik_{bemor_id}"
+        )
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+        logger.info(f"Bemor #{bemor_id} uchun eslatmalar rejalashtirildi.")
+    except Exception as e:
+        logger.error(f"Rejalashtirish xatosi: {e}")
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
-            ASK_AGE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, got_age)],
-            ASK_PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_problem)],
-            ASK_CLINIC:  [CallbackQueryHandler(got_clinic, pattern="^clinic_")],
-        },
-        fallbacks=[CommandHandler("start", start)],
+async def eslatma_bir_kun(bemor_id, ism, klinika, sana, vaqt):
+    await bot.send_message(
+
+
+        DOCTOR_CHAT_ID,
+ f" <b>ERTANGI QABUL ESLATMASI</b>\n\n"
+ f" Bemor ID: #{bemor_id}\n"
+ f" Bemor: {ism}\n"
+ f" Sana: {sana}\n"
+ f" Vaqt: {vaqt}\n"
+ f" Klinika: {klinika}",
+        parse_mode="HTML"
     )
 
-    app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(new_apps,      pattern="^new_apps$"))
-    app.add_handler(CallbackQueryHandler(all_apps,      pattern="^all_apps$"))
-    app.add_handler(CallbackQueryHandler(confirm_start, pattern="^confirm_start$"))
+async def eslatma_bir_soat(bemor_id, ism, klinika, sana, vaqt):
+    await bot.send_message(
+        DOCTOR_CHAT_ID,
+ f" <b>1 SOATDAN KEYIN QABUL!</b>\n\n"
+ f" Bemor ID: #{bemor_id}\n"
+ f" Bemor: {ism}\n"
+ f" Sana: {sana}\n"
+ f" Vaqt: {vaqt}\n"
+ f" Klinika: {klinika}",
+        parse_mode="HTML"
+    )
+
+async def korik_tasdiqlash_yuborish(bemor_id, ism, klinika, sana, vaqt, user_id):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+ text=" Ko'rikdan o'tkazildi",
+            callback_data=f"korik_{bemor_id}_{user_id}"
+        )]
+    ])
+    await bot.send_message(
+        DOCTOR_CHAT_ID,
+ f" <b>QABUL VAQTI KELDI</b>\n\n"
+ f" Bemor: {ism}\n"
+ f" Sana: {sana}\n"
+ f" Vaqt: {vaqt}\n"
+ f" Klinika: {klinika}\n\n"
+        f"Bemorni ko'rikdan o'tkazgandan so'ng tasdiqlang:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+# ==================== KO'RIK TASDIQLASH ====================
+@dp.callback_query(F.data.startswith("korik_"))
+async def korik_tasdiqlash(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    bemor_id = parts[1]
+    user_id = int(parts[2])
 
 
-    app.add_handler(CallbackQueryHandler(confirm_ap,    pattern=r"^conf_\d+$"))
-    app.add_handler(CallbackQueryHandler(reject_start,  pattern="^reject_start$"))
-    app.add_handler(CallbackQueryHandler(reject_ap,     pattern=r"^rej_\d+$"))
-    app.add_handler(CallbackQueryHandler(back,          pattern="^back$"))
+    # Sheets da statusni yangilash
+    try:
+        sheet = get_sheet()
+        all_rows = sheet.get_all_values()
+        for i, row in enumerate(all_rows):
+            if str(row[0]) == str(bemor_id):
+                sheet.update_cell(i + 1, 11, "Ko'rikdan o'tdi")
+                ism = row[1]
+                break
+    except Exception as e:
+        logger.error(f"Ko'rik yangilash xatosi: {e}")
+        ism = f"#{bemor_id}"
 
-    print("Bot ishga tushdi!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await callback.message.edit_text(
+ f" <b>Bemor #{bemor_id} ({ism}) ko'rikdan o'tkazildi!</b>\n\n"
+ f" Status Google Sheets da yangilandi.",
+        parse_mode="HTML"
+    )
+ await callback.answer(" Tasdiqlandi!")
+
+# ==================== MAIN ====================
+async def main():
+    scheduler.start()
+    logger.info("Bot ishga tushdi...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
